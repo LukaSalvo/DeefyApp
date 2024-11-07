@@ -1,0 +1,14 @@
+{
+  "name": "iutnc/deefy",
+  "description": "Td5",
+  "type": "project",
+  "autoload": {
+    "psr-4": {
+      "iutnc\\deefy\\" : "./conf",
+      "iutnc\\deefy\\" : "./src/classes"
+    }
+  },
+  "require": {
+    "ext-pdo": "*"
+  }
+}

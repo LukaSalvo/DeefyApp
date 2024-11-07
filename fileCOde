@@ -1,0 +1,987 @@
+
+<?php
+
+namespace iutnc\deefy\action;
+
+abstract class Action {
+
+    protected ?string $http_method = null;
+    protected ?string $hostname = null;
+    protected ?string $script_name = null;
+
+    public function __construct(){
+
+        $this->http_method = $_SERVER['REQUEST_METHOD'];
+        $this->hostname = $_SERVER['HTTP_HOST'];
+        $this->script_name = $_SERVER['SCRIPT_NAME'];
+    }
+
+    abstract public function execute() : string;
+
+}
+<?php
+
+namespace iutnc\deefy\action;
+
+
+use iutnc\deefy\audio\list\Playlist;
+use iutnc\deefy\render\AudioListRenderer;
+use iutnc\deefy\render\Renderer;
+use iutnc\deefy\repository\DeefyRepository;
+
+class AddPlaylistAction extends Action{
+
+    public function execute(): string
+    {
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['playlist_name'])) {
+
+            $nomPlaylist = filter_var($_POST['playlist_name'], FILTER_SANITIZE_SPECIAL_CHARS);
+            $playlist = new Playlist($nomPlaylist);
+            $repo= DeefyRepository::getInstance();
+            $playlist= $repo->saveEmptyPlaylist($playlist);
+
+            $_SESSION['playlist'] = $playlist;
+
+
+            $renderer = new AudioListRenderer($playlist);
+            $html = $renderer->render(Renderer::LONG);
+            $html .= "<a href='?action=add-track'>Ajouter une piste</a>";
+
+            return $html;
+        } else {
+
+            return
+                <<<HTML
+            <form method="post" action="?action=add-playlist">
+                <label for="playlist_name">Nom de la playlist :</label>
+                <input type="text" name="playlist_name" id="playlist_name" required>
+                <button type="submit">Créer Playlist</button>
+            </form>
+            HTML;
+            }
+        }
+
+}
+
+<?php
+
+namespace iutnc\deefy\action;
+
+use iutnc\deefy\audio\tracks\PodcastTrack;
+use iutnc\deefy\render\AudioListRenderer;
+
+class AddPodcastTrackAction extends Action {
+
+    public function execute(): string {
+
+        if (!isset($_SESSION['playlist'])) {
+            return "Aucune playlist trouvée. Veuillez créer une playlist d'abord.";
+        }
+
+
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['podcast_title']) && isset($_POST['podcast_file']) && isset($_POST['podcast_date'])) {
+            $title = filter_var($_POST['podcast_title'], FILTER_SANITIZE_SPECIAL_CHARS);
+            $fileName = filter_var($_POST['podcast_file'], FILTER_SANITIZE_SPECIAL_CHARS);
+            $date = filter_var($_POST['podcast_date'], FILTER_SANITIZE_STRING);
+
+
+            $podcastTrack = new PodcastTrack($title, $fileName, $date);
+
+
+            $_SESSION['playlist']->ajtPiste($podcastTrack);
+
+
+            $renderer = new AudioListRenderer($_SESSION['playlist']);
+            $html = $renderer->render(2);
+
+            return $html . "<p>Piste ajoutée avec succès !</p>";
+        }
+
+
+        return $this->renderForm();
+    }
+
+    private function renderForm(): string {
+        return <<<HTML
+        <form method="post" action="?action=add-podcast-track">
+            <label for="podcast_title">Titre du Podcast :</label>
+            <input type="text" name="podcast_title" id="podcast_title" required>
+            <label for="podcast_file">Nom du fichier :</label>
+            <input type="text" name="podcast_file" id="podcast_file" required>
+            <label for="podcast_date">Date de publication :</label>
+            <input type="date" name="podcast_date" id="podcast_date" required>
+            <button type="submit">Ajouter Podcast Track</button>
+        </form>
+        HTML;
+    }
+}
+
+<?php
+
+namespace iutnc\deefy\action;
+
+class DefaultAction extends Action {
+
+    public function execute(): string {
+        return '
+        <!DOCTYPE html>
+        <html lang="fr">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Bienvenue sur Deefy</title>
+            <link rel="stylesheet" href="src/style/styleDefault.css">
+        </head>
+        <body>
+            <div class="container">
+                <h1>Bienvenue sur Deefy, la meilleure application de musique !</h1>
+                <p class="introduction">
+                    Explorez vos morceaux préférés !
+                    <br>
+                    Commencez votre aventure musicale maintenant !
+                </p>
+            </div>
+
+        </body>
+        </html>';
+    }
+
+}
+
+<?php
+
+
+namespace iutnc\deefy\action;
+
+use iutnc\deefy\auth\AuthnProvider;
+use iutnc\deefy\auth\Authz;
+use iutnc\deefy\repository\DeefyRepository;
+
+class DisplayPlaylistAction {
+
+    private AuthnProvider $authProvider;
+    private DeefyRepository $repo;
+
+    public function __construct(AuthnProvider $authProvider, DeefyRepository $repo) {
+        $this->authProvider = $authProvider;
+        $this->repo = $repo;
+    }
+
+    public function execute(int $playlistId) {
+        $user = $this->authProvider->getSignedInUser();
+
+        Authz::checkPlaylistOwner($playlistId, $user->id);
+
+        $playlist = $this->repo->findPlaylistById($playlistId);
+
+        if ($playlist) {
+            echo "Nom de la playlist : " . $playlist->nom . "<br/>";
+            foreach ($playlist->getTracks() as $track) {
+                echo " - " . $track->titre . " (" . $track->duree . " secondes)<br/>";
+            }
+        } else {
+            echo "Playlist non trouvée.";
+        }
+    }
+}
+
+<?php
+
+
+namespace iutnc\deefy\action;
+
+use iutnc\deefy\auth as A;
+use iutnc\deefy\exception as E;
+
+class RegisterAction extends Action
+{
+    public function execute(): string
+    {
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+            $email = filter_var($_POST['email'], FILTER_SANITIZE_EMAIL);
+            $password = $_POST['password'];
+            $passwordConfirmation = $_POST['password_confirmation'];
+
+            if ($password !== $passwordConfirmation) {
+                return "Les mots de passe ne correspondent pas.";
+            }
+
+            try {
+                A\AuthnProvider::register($email, $password , $passwordConfirmation);
+                return "Inscription réussie !";
+            } catch (E\AuthnException $e) {
+                return $e->getMessage();
+            }
+        }
+
+        return $this->renderForm();
+    }
+
+    private function renderForm(): string
+    {
+        return <<<HTML
+        <h2>Inscription</h2>
+        <form method="post" action="?action=register">
+            <label for="email">Email :</label>
+            <input type="email" name="email" id="email" required>
+            <label for="password">Mot de passe :</label>
+            <input type="password" name="password" id="password" required>
+            <label for="password_confirmation">Confirmez le mot de passe :</label>
+            <input type="password" name="password_confirmation" id="password_confirmation" required>
+            <button type="submit">S'inscrire</button>
+        </form>
+        HTML;
+    }
+}
+
+<?php
+
+namespace iutnc\deefy\action;
+
+use iutnc\deefy\auth\AuthnProvider;
+use iutnc\deefy\exception\AuthnException;
+
+class SigninAction extends Action {
+    public function execute(): string {
+        if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+            $email = filter_var($_POST['email'], FILTER_SANITIZE_EMAIL);
+            $password = $_POST['password'];
+
+            try {
+                $authnProvider = new AuthnProvider(/* Instance PDO ici */);
+                $authnProvider->signin($email, $password);
+
+                // Redirige vers la page des playlists de l'utilisateur après connexion
+                header("Location: ?action=user-playlists");
+                exit;
+            } catch (AuthnException $e) {
+                header("Location: ?action=signinAction&error=" . urlencode($e->getMessage()));
+                exit;
+            }
+        }
+
+        return $this->renderForm();
+    }
+
+    private function renderForm(): string {
+        return <<<HTML
+        <h2>Connexion</h2>
+        <form method="post" action="?action=signinAction">
+            <label for="email">Email :</label>
+            <input type="email" name="email" id="email" required>
+            <label for="password">Mot de passe :</label>
+            <input type="password" name="password" id="password" required>
+            <button type="submit">Se connecter</button>
+        </form>
+        HTML;
+    }
+}
+
+<?php
+
+namespace iutnc\deefy\audio\list;
+class Album extends AudioList{
+
+    private $dateDeSortie;
+
+    private $artiste;
+
+
+    public function __construct(string $nomListe ,$pistes,string $artiste){
+        parent::__construct($nomListe,$pistes);
+        $this->artiste = $artiste;
+        $this->dateDeSortie = date_create();
+    }
+
+    public function __setArtiste(string $artiste){
+        $this->artiste = $artiste;
+    }
+
+    public function __setDateDeSortie($dateDeSortie){
+        $this->dateDeSortie = $dateDeSortie;
+    }
+
+
+    public function setId(int $id): void
+    {
+        $this->id = $id;
+    }
+
+
+}
+
+<?php
+
+
+namespace iutnc\deefy\audio\list;
+use \iutnc\deefy\exception\InvalidPropertyNameException;
+class AudioList
+{
+
+    protected string $nom;
+    protected int $nbPistes;
+    private float $dureeTotale;
+    private int $id ;
+    private $pistes = [];
+
+    public function __construct(string $nomAlbum, $pistes = [])
+    {
+        $this->nom = $nomAlbum;
+        $this->pistes = $pistes;
+        $this->nbPistes = count($pistes);
+        $this->dureeTotale = $this->calculerDureePiste($pistes);
+
+
+    }
+
+
+    public function calculerDureePiste($pistes): int
+    {
+        $duree = 0;
+        foreach ($pistes as $value) {
+            $duree += $value->__get('duree');
+        }
+        return $duree;
+    }
+
+    public function __get(mixed $attributs): mixed
+    {
+        if (property_exists($this, $attributs)) {
+            return $this->$attributs;
+        } else {
+            throw new InvalidPropertyNameException("$attributs : invalid property");
+        }
+    }
+
+
+
+    /**
+     * @param int $id
+     */
+    public function setId(int $id): void
+    {
+        $this->id = $id;
+    }
+
+
+}
+
+<?php
+
+namespace iutnc\deefy\audio\list;
+class Playlist extends AudioList {
+
+
+
+    public function __construct (string $nom) {
+        parent::__construct($nom);
+
+    }
+
+    public function ajtPiste($piste){
+        $this->pistes[$this->nbPistes] = $piste;
+        $this->nbPistes ++;
+        $this->duree += $piste->duree;
+    }
+
+
+    public function supPiste(int $indice){
+        if($indice < $this->nbPistes && $indice > 0){
+            $this->nbPistes -= 1;
+            $this->duree -= $this->pistes[$indice]->duree;
+            unset($this->pistes[$indice]);
+
+        }
+    }
+
+
+    public function ajtPiste2( $piste){
+        $this->pistes = array_unique(array_merge($this->pistes,$piste));
+    }
+
+
+
+
+
+}
+
+<?php
+
+namespace iutnc\deefy\audio\tracks;
+use  \iutnc\deefy\render as R;
+
+class AlbumTrack extends AudioTrack {
+    protected $album;
+    protected $annee;
+    protected $numero_piste;
+
+
+    public function __construct($titre, $nom_fichier) {
+        parent::__construct($titre, $nom_fichier);
+    }
+
+    public function getRenderer() : R\AlbumTrackRenderer{
+        return new R\AlbumTrackRenderer($this);
+    }
+
+    public function __toString() {
+
+        return "AlbumTrack " . parent::__toString() . json_encode($this);
+
+    }
+
+}
+
+
+?>
+
+<?php
+
+namespace iutnc\deefy\audio\tracks;
+use \iutnc\deefy\exception as E;
+class AudioTrack {
+    protected $titre;
+    protected $auteur;
+    protected $genre;
+    protected $duree;
+    protected $nom_fichier;
+
+
+    protected $id;
+
+    public function __construct($titre, $nom_fichier) {
+        $this->titre = $titre;
+        $this->nom_fichier = $nom_fichier;
+
+    }
+
+    public function __toString() {
+        return json_encode($this);
+    }
+
+    public function __get(string $attribut): mixed{
+        if(property_exists($this,$attribut)){
+            return $this->$attribut;
+        }
+        throw new E\InvalidPropertyNameException("$attribut : invalid property");
+    }
+
+    public function __set(string $attribut,mixed $value){
+        if($attribut === 'duree'){
+            if($value>=0){
+                $this->$attribut = $value;
+            } else throw new E\InvalidPropertyValueException("$value < 0 :  invalid value");
+        } elseif (property_exists($this,$attribut) && $attribut !='titre' && $attribut !='nom_fichier'){
+            $this->$attribut = $value;
+        }
+        else throw new E\InvalidPropertyNameException("$attribut : invalid property");
+    }
+
+
+    /**
+     * @param mixed $id
+     */
+    public function setId($id): void
+    {
+        $this->id = $id;
+    }
+
+
+
+}
+
+<?php
+
+namespace iutnc\deefy\audio\tracks;
+use  \iutnc\deefy\render as R;
+
+class PodcastTrack extends AudioTrack {
+    protected $date;
+
+    public function __construct($titre, $nom_fichier,$auteur, $date , $duree , $genre) {
+        parent::__construct($titre, $nom_fichier);
+        $this->auteur = $auteur;
+        $this->date = $date;
+        $this->duree = $duree;
+        $this->genre = $genre;
+    }
+
+
+
+}
+
+
+<?php
+
+namespace iutnc\deefy\auth;
+
+use iutnc\deefy\exception as E;
+use PDO;
+use iutnc\deefy\repository\DeefyRepository;
+class AuthnProvider {
+    private PDO $pdo;
+
+    public function __construct(PDO $pdo) {
+        $this->pdo = $pdo;
+    }
+
+    public function signin(string $email, string $passwd2check): void {
+        $stmt = $this->pdo->prepare("SELECT passwd FROM User WHERE email = ?");
+        $stmt->execute([$email]);
+        $user = $stmt->fetch(PDO::FETCH_ASSOC);
+
+        if (!$user || !password_verify($passwd2check, $user['passwd'])) {
+            throw new E\AuthException("Auth error: invalid credentials");
+        }
+
+        $_SESSION['user'] = $email;
+    }
+
+    public static function register(string $email, string $password): void
+    {
+        $repo = DeefyRepository::getInstance();
+        if (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
+            throw new E\AuthException("L'adresse email est invalide");
+        }
+        if (AuthnProvider::checkPasswordStrength($password, 10)) {
+            $hash = password_hash($password, PASSWORD_DEFAULT, ['cost' => 12]);
+            $repo->addUser($email, $hash, 1);
+
+        } else {
+            throw new E\AuthException("Le mot de passe doit contenir au moins 8 caractères, incluant une majuscule, une minuscule, un chiffre et un caractère spécial.");
+        }
+    }
+
+
+    public function checkPasswordStrength(string $pass,
+                                          int $minimumLength): bool
+    {
+        $length = (strlen($pass) < $minimumLength); // longueur minimale
+        $digit = preg_match("#[\d]#", $pass); // au moins un digit
+        $special = preg_match("#[\W]#", $pass); // au moins un car. spécial
+        $lower = preg_match("#[a-z]#", $pass); // au moins une minuscule
+        $upper = preg_match("#[A-Z]#", $pass); // au moins une majuscule
+        if (!$length || !$digit || !$special || !$lower || !$upper) return false;
+        return true;
+    }
+
+
+}
+
+<?php
+
+namespace iutnc\deefy\dispatch;
+
+
+use iutnc\deefy\action\AddPlaylistAction;
+use iutnc\deefy\action\AddPodcastTrackAction;
+use iutnc\deefy\action\DefaultAction;
+use iutnc\deefy\action\DisplayPlaylistAction;
+use iutnc\deefy\action\AddUserAction;
+use iutnc\deefy\action\RegisterAction;
+use iutnc\deefy\action\SigninAction;
+
+class Dispatcher {
+
+
+    private string $action;
+
+
+    public function __construct() {
+        $this->action = $_GET['action'] ?? 'default';
+    }
+
+
+    public function run(): void {
+        switch ($this->action) {
+            case 'signinAction':
+                $action = new SigninAction();
+                break;
+            case 'registerAction':
+                $action = new RegisterAction();
+                break;
+            case 'playlist':
+                $action = new DisplayPlaylistAction();
+                break;
+            case 'add-playlist':
+                $action = new AddPlaylistAction();
+                break;
+            case 'add-track':
+                $action = new AddPodcastTrackAction();
+                break;
+            case 'default':
+            default:
+                $action = new DefaultAction();
+                break;
+        }
+
+        $res = $action->execute();
+        $this->renderPage($res);
+    }
+
+
+
+    public function renderPage(string $res): void {
+        echo <<<HTML
+    <html>
+    <head>
+        <title>Deefy App</title>
+        <link rel="stylesheet" href="src/style/styleDispatcher.css">
+    </head>
+    <body>
+        <main>$res</main>
+        <nav>
+            <a href="?action=default">Accueil</a>
+            <a href="?action=registerAction">Inscription</a>
+            <a href = "?action=signinAction">Connexion</a>
+        </nav>
+    </body>
+    </html>
+    HTML;
+    }
+}
+
+<?php
+
+namespace iutnc\deefy\exception;
+
+use Throwable;
+
+class AuthnException extends \Exception{
+
+
+    public function __construct($message = ""){
+        parent::__construct($message);
+    }
+}
+
+<?php
+
+namespace iutnc\deefy\exception;
+
+class InvalidPropertyNameException extends \Exception{
+    public function __construct($message = ""){
+        parent::__construct($message);
+    }
+}
+?>
+
+<?php
+namespace iutnc\deefy\exception;
+class InvalidPropertyValueException extends \Exception{
+    public function __construct($message = ""){
+        parent::__construct($message);
+    }
+}
+?>
+
+<?php
+namespace iutnc\deefy\render;
+class AlbumTrackRenderer extends AudioTrackRenderer{
+
+    protected function renderCompact(): string {
+        return "<div><h1><strong>{$this->audio->titre}</strong> </h1>
+               par {$this->audio->auteur} - {$this->audio->duree} secondes\n
+               <p><audio controls><source src='{$this->audio->nom_fichier}' type='audio/mp3'></audio></p></div>";
+    }
+
+    protected function renderLong(): string {
+        return "<div><h1>{$this->audio->titre}</h1>
+                <p>Artiste: {$this->audio->auteur}</p>
+                <p>Album: {$this->audio->album}</p>
+                <p>Année: {$this->audio->annee}</p>
+                <p>Numéro: {$this->audio->numero_piste}</p>
+                <p>Genre: {$this->audio->genre}</p>
+                <p>Duree: {$this->audio->duree} secondes</p>
+                <audio controls><source src='{$this->audio->nom_fichier}' type='audio/mp3'></audio></div>";
+    }
+}
+?>
+
+<?php
+
+namespace iutnc\deefy\render;
+class AudioListRenderer implements Renderer{
+
+    private $audioList;
+
+    public function __construct($audioList)
+    {
+        $this->audioList = $audioList;
+    }
+
+
+    public function render(int $selector): string
+    {
+        $res =  "<h1>Nom : {$this->audioList->nom}</h1>\n";
+
+        foreach ($this->audioList->pistes as $value) {
+            $renderValue = $value->getRenderer();
+            $res .= $renderValue->render(Renderer::COMPACT) . "\n";
+        }
+        $res .= "<p>Nombre de pistes : {$this->audioList->nbPistes} </p>\n";
+        $res .= "<p>Durée totale : {$this->audioList->dureeTotale} secondes </p>\n";
+
+        return $res;
+    }
+
+
+}
+
+<?php
+namespace iutnc\deefy\render;
+abstract class AudioTrackRenderer implements Renderer{
+  protected $audio;
+
+  public function __construct($audio) {
+      $this->audio = $audio;
+  }
+
+  public function render(int $selector): string {
+    $res = '';
+    if ($selector == Renderer::COMPACT) {
+      $res = $this->renderCompact();
+    } elseif ($selector == Renderer::LONG) {
+        $res= $this->renderLong();
+    }
+    return $res;
+  }
+
+  protected abstract function renderCompact(): string;
+
+  protected abstract function renderLong(): string;
+
+
+
+}
+
+?>
+
+
+<?php
+namespace iutnc\deefy\render;
+class PodcastRenderer extends AudioTrackRenderer{
+
+  protected function renderCompact(): string {
+      return "<div><strong>{$this->audio->titre}</strong> par {$this->audio->auteur} - {$this->audio->duree} secondes<audio controls><source src='{$this->audio->nom_fichier}' type='audio/mpeg'></audio></div>";
+  }
+
+  protected function renderLong(): string {
+      return "<div><h1>{$this->audio->titre} </h1><p>Auteur: {$this->audio->auteur}</p><p>Date: {$this->audio->date}</p> <p>Genre: {$this->audio->genre}</p><p>Duree: {$this->audio->duree} seconds</p><audio controls><source src='{$this->audio->nom_fichier}' type='audio/mpeg'></audio></div>";
+  }
+}
+?>
+
+<?php
+
+namespace iutnc\deefy\render;
+
+interface Renderer{
+  const COMPACT = 1;
+  const LONG = 2;
+
+  public function render(int $selector);
+}
+?>
+
+<?php
+namespace iutnc\deefy\repository;
+
+use iutnc\deefy\audio\list\Playlist;
+use iutnc\deefy\audio\tracks\AudioTrack;
+use PDO;
+
+class DeefyRepository {
+
+    private PDO $pdo;
+    private static ?DeefyRepository $instance = null;
+    private static array $config = [];
+
+    private function __construct(array $conf) {
+        $this->pdo = new PDO($conf['dsn'], $conf['user'], $conf['pass'], [
+            PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION
+        ]);
+    }
+
+    public static function getInstance(): ?DeefyRepository {
+        if (is_null(self::$instance)) {
+            if (empty(self::$config)) {
+                throw new \Exception("La configuration de la base de données n'a pas été définie.");
+            }
+            self::$instance = new DeefyRepository(self::$config);
+        }
+        return self::$instance;
+    }
+
+    public static function setConfig(string $file) {
+        $conf = parse_ini_file($file);
+        if ($conf === false) {
+            throw new \Exception("Erreur pendant la lecture du fichier de configuration.");
+        }
+        if (!isset($conf['host'], $conf['dbname'], $conf['username'])) {
+            throw new \Exception("Le fichier de configuration ne contient pas toutes les clés nécessaires.");
+        }
+
+        self::$config = [
+            'dsn' => "mysql:host=" . $conf['host'] . ";dbname=" . $conf['dbname'] ,
+            'user' => $conf['username'],
+            'pass' => $conf['password']
+        ];
+    }
+
+    public function saveEmptyPlaylist(Playlist $pk): Playlist {
+        $query = "INSERT INTO playlist (nom) VALUES (:nom)";
+        $stmt = $this->pdo->prepare($query);
+        $stmt->execute(['nom' => $pk->nom]);
+        $pk->setID($this->pdo->lastInsertId());
+        return $pk;
+    }
+
+    public function findAllPlaylists(): array {
+
+        $query = "SELECT * FROM playlist";
+        $stmt = $this->pdo->prepare($query);
+        $stmt->execute();
+        $playlists = [];
+        while($data = $stmt->fetch()) {
+            $playlist = new Playlist($data['nom']);
+            $playlist->setId($data['id']);
+            array_push($playlists, $playlist);
+
+        }
+        return $playlists;
+    }
+
+
+    public function savePodcastTrack(AudioTrack $track): AudioTrack {
+        $stmt = $this->pdo->prepare("INSERT INTO track (titre, filename, duree) VALUES (:title, :file, :duration)");
+        $stmt->execute([
+            'title' => $track->titre,
+            'file' => $track->nom_fichier,
+            'duration' => $track->duree,
+        ]);
+        $track->setId($this->pdo->lastInsertId());
+        return $track;
+    }
+
+
+    public function addTrackToPlaylist(int $trackId, int $playlistId): void{
+        $query = "SELECT COUNT(*) FROM playlist2track WHERE  id_pl = :playlistId";
+        $stmt2 = $this->pdo->prepare($query);
+        $stmt2->execute(['playlistId' => $playlistId]);
+        $data = $stmt2->fetch();
+        $nbLigne = $data['COUNT(*)'];
+        $stmt = $this->pdo->prepare("INSERT INTO playlist2track (id_pl, id_track , no_piste_dans_liste) VALUES (:playlist_id, :track_id , :ligne)");
+        $stmt->execute(['playlist_id' => $playlistId, 'track_id' => $trackId , 'ligne' => $nbLigne]);
+    }
+
+
+    public function findPlaylistById(int $playlistId): ?Playlist {
+        // Requête pour récupérer les informations de la playlist
+        $stmt = $this->pdo->prepare("SELECT * FROM playlist WHERE id = :id");
+        $stmt->execute(['id' => $playlistId]);
+        $playlistData = $stmt->fetch();
+
+        if ($playlistData) {
+            // Création de la playlist
+            $playlist = new Playlist($playlistData['id'], $playlistData['nom']);
+
+            // Requête pour récupérer les pistes associées à cette playlist
+            $trackStmt = $this->pdo->prepare("SELECT * FROM track WHERE id_playlist = :id_playlist");
+            $trackStmt->execute(['id_playlist' => $playlistId]);
+
+            while ($trackData = $trackStmt->fetch()) {
+                $track = new Track($trackData['id'], $trackData['titre'], $trackData['genre'], $trackData['duree']);
+                $playlist->ajouterPiste($track);
+            }
+
+            return $playlist;
+        }
+
+        return null;
+    }
+
+    public function findUserById(int $userId): ?User {
+        $stmt = $this->pdo->prepare("SELECT * FROM user WHERE id = :id");
+        $stmt->execute(['id' => $userId]);
+        $userData = $stmt->fetch();
+
+        if ($userData) {
+            return new User($userData['id'], $userData['email'], $userData['password']);
+        }
+
+        return null;
+    }
+
+
+
+
+
+
+
+}
+
+
+<?php
+
+
+namespace iutnc\deefy\users;
+use iutnc\deefy\exception as E;
+
+
+class User{
+
+
+    private int $id;
+    private $email;
+    private $password;
+
+    public function __construct(int $id, string $email, string $password){
+        $this->id = $id;
+        $this->email = $email;
+        $this->password = $password;
+    }
+
+
+    public function __get(string $attribut): mixed{
+        if(property_exists($this,$attribut)){
+            return $this->$attribut;
+        }
+        throw new E\InvalidPropertyNameException("$attribut : invalid property");
+    }
+
+    /**
+     * @param int $id
+     */
+    public function setId(int $id): void
+    {
+        $this->id = $id;
+    }
+
+}
+
+
+<?php
+
+
+require_once "vendor/autoload.php";
+require_once 'src/classes/dispatch/Dispatcher.php';
+
+
+
+use \iutnc\deefy\dispatch\Dispatcher;
+
+use iutnc\deefy\repository\DeefyRepository;
+
+
+session_start();
+
+DeefyRepository::setConfig('src/config/db.config.ini');
+$reponse = DeefyRepository::getInstance();
+
+
+
+
+
+$dispatcher = new Dispatcher();
+$dispatcher->run();
